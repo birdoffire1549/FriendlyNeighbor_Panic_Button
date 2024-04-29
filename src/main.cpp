@@ -297,6 +297,10 @@ void resetOrLoadSettings() {
   }
 }
 
+/**
+ * Initializes the device's display.
+ * 
+*/
 void initDisplay() {
   display.begin();
   display.show(F("Initializing..."));
@@ -917,25 +921,27 @@ bool handleAdminPageUpdates() {
     return true;
   }
 
-  if (settings.saveSettings()) {
-    if (needReboot) {
-      content = "<h3>Settings update Successful!</h3><h4>Device will reboot now...</h4>";
-      sendHtmlPageUsingTemplate(200, "Update Successful", "Update Result", content);
-      yield();
-      delay(5000);
+  if (isChange) {
+    if (settings.saveSettings()) {
+      if (needReboot) {
+        content = "<h3>Settings update Successful!</h3><h4>Device will reboot now...</h4>";
+        sendHtmlPageUsingTemplate(200, "Update Successful", "Update Result", content);
+        yield();
+        delay(5000);
 
-      ESP.restart();
-    } else if (isChange) {
-      content = "<h3>Settings update Successful!</h3>";
-      sendHtmlPageUsingTemplate(200, "Update Successful", "Update Result", content);
+        ESP.restart();
+      } else if (isChange) {
+        content = "<h3>Settings update Successful!</h3>";
+        sendHtmlPageUsingTemplate(200, "Update Successful", "Update Result", content);
 
-      return true;
+        return true;
+      }
+    } else  {
+      content = "<h3>Error Saving Settings!!!</h3>";
+      sendHtmlPageUsingTemplate(500, "Internal Error", "500 - Internal Server Error", content);
+
+        return true;
     }
-  } else {
-    content = "<h3>Error Saving Settings!!!</h3>";
-    sendHtmlPageUsingTemplate(500, "Internal Error", "500 - Internal Server Error", content);
-
-      return true;
   }
 
   return false;
