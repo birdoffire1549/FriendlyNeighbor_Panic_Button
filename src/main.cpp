@@ -19,13 +19,17 @@
 #define CANCEL_BTN_PIN 13
 #define LED_PIN 16
 
+enum MessageType {
+  MT_ALERT,
+  MT_PARTIAL,
+  MT_CANCEL
+};
+
 void resetOrLoadSettings();
 void initNetwork();
 void initDisplay();
 void initWeb();
-void sendAlert();
-void sendPartial();
-void sendCancel();
+void sendMessage(enum MessageType messageType);
 void dumpDeviceInfo();
 bool isConnectionGood();
 
@@ -148,15 +152,15 @@ void doHandleButtons() {
         delay(1000);
       }
       if (countDown == -1) {
-          display.show("Panic In Progress...");
+          display.show(F("Panic In Progress..."));
           display.ledFlash();
           settings.setInPanicMode(true);
-          sendAlert();
+          sendMessage(MessageType::MT_ALERT);
           while (digitalRead(PANIC_BTN_PIN) == HIGH) {
             yield();
           }
       } else {
-        display.show("Panic Aborted.");
+        display.show(F("Panic Aborted."));
         display.ledOff();
         yield();
         delay(5000);
@@ -176,17 +180,17 @@ void doHandleButtons() {
         delay(1000);
       }
       if (countDown == -1) {
-          display.show("Panic Canceled.");
+          display.show(F("Panic Canceled."));
           display.ledOff();
           settings.setInPanicMode(false);
-          sendCancel();
+          sendMessage(MessageType::MT_CANCEL);
           yield();
           delay(5000);
           while (digitalRead(CANCEL_BTN_PIN) == HIGH) {
             yield();
           }
       } else {
-        display.show("Cancel Aborted.");
+        display.show(F("Cancel Aborted."));
         display.ledOff();
         yield();
         delay(5000);
@@ -258,8 +262,8 @@ bool isConnectionGood() {
  */
 void resetOrLoadSettings() {
   if (digitalRead(CANCEL_BTN_PIN) == HIGH) { // Restore button pressed on boot...
-    Serial.println("Factory Reset?");
-    display.show("Factory Reset?");
+    Serial.println(F("Factory Reset?"));
+    display.show(F("Factory Reset?"));
     int cntdwn = 3;
     unsigned long lastCount = millis();
     while (digitalRead(CANCEL_BTN_PIN) == HIGH && cntdwn >= 0) {
@@ -276,7 +280,7 @@ void resetOrLoadSettings() {
       Serial.println(F("\nPerforming Factory Reset..."));
       settings.factoryDefault();
       Serial.println(F("Factory reset complete."));
-      display.show("Reset Complete!");
+      display.show(F("Reset Complete!"));
       yield();
       delay(2000);
 
@@ -284,8 +288,8 @@ void resetOrLoadSettings() {
         yield();
       }
     } else {
-      Serial.println("Factory reset aborted.");
-      display.show("Reset Aborted.");
+      Serial.println(F("Factory reset aborted."));
+      display.show(F("Reset Aborted."));
       yield();
       delay(3000);
     }
@@ -307,7 +311,7 @@ void initDisplay() {
   display.ledOn();
 }
 
-void sendAlert() {
+void sendMessage(enum MessageType msgType) {
   Session_Config config;
   config.server.host_name = settings.getSmtpHost();
   config.server.port = settings.getSmtpPort();
@@ -325,236 +329,127 @@ void sendAlert() {
   // config.time.gmt_offset = 3;
   // config.time.day_light_offset = 0;
 
-  SMTP_Message message;
-  message.sender.name = settings.getFromName();
-  message.sender.email = settings.getFromEmail();
-  String panicLevel = "TEST";
+  SMTP_Message msg;
+  msg.sender.name = settings.getFromName();
+  msg.sender.email = settings.getFromEmail();
+  String panicLevel = F("TEST");
   switch(settings.getPanicLevel()) {
     case 1:
-      panicLevel = "TEST";
+      panicLevel = F("TEST");
     break;
     case 2:
-      panicLevel = "INFORMATIONAL";
+      panicLevel = F("INFORMATIONAL");
     break;
     case 3:
-      panicLevel = "WARNING";
+      panicLevel = F("WARNING");
     break;
     case 4:
-      panicLevel = "CRITICAL";
+      panicLevel = F("CRITICAL");
     break;
     case 5:
-      panicLevel = "EMERGENCY";
+      panicLevel = F("EMERGENCY");
     break;
   } 
-  
-  message.subject = String(panicLevel + " Alert from: " + settings.getOwner());
 
   String recips = settings.getRecipients();
   unsigned int addrCnt = ParseUtils::occurrences(recips, ";");
   String addresses[addrCnt];
   ParseUtils::split(recips, ';', addresses, sizeof(addresses));
   for (String addr : addresses) {
-    message.addRecipient("", addr);
+    msg.addRecipient("", addr);
   }
-
-  message.text.content = settings.getMessage();
+  
+  switch (msgType) {
+    case MT_ALERT:
+      msg.subject = String(panicLevel + " Alert from: " + settings.getOwner());
+      msg.text.content = settings.getMessage();
+      break;
+    case MT_PARTIAL:
+      msg.subject = String(panicLevel + " Alert from: " + settings.getOwner());
+      msg.text.content = F("Not all recipients were able to receive the alert!\nYou may want to take that into account with your response!!!");
+      break;
+    case MT_CANCEL:
+      msg.subject = String("Canceled:" + panicLevel + " Alert from: " + settings.getOwner());
+      msg.text.content = F("The prior alert has been Canceled by the sender!");
+      break;
+  }
 
   SMTPSession smtp;
   smtp.debug(1);
-  smtp.callback([](SMTP_Status status) {
-    Serial.printf("\nSend results...\n\tCompleated Count: %d\n\tFailed Count: %d\n\tInformation:\n\t\t%s\n\n", status.completedCount(), status.failedCount(), status.info());
-    if (status.failedCount() != 0) {
+  if (msgType == MT_ALERT) {
+    smtp.callback([](SMTP_Status status) {
+      Serial.printf("\nSend results...\n\tCompleated Count: %d\n\tFailed Count: %d\n\tInformation:\n\t\t%s\n\n", status.completedCount(), status.failedCount(), status.info());
+      if (status.failedCount() != 0) {
+        lastAlertSendError = true;
+        if (status.completedCount() == 0) {
+          display.show(F("Send Error!!!"));
+          display.ledOn();
+        } else {
+          display.show(F("Partial Send!"));
+          display.ledFlash();
+          sendMessage(MessageType::MT_PARTIAL);
+        }
+      }
+    });
+  } else if (msgType == MT_PARTIAL) {
+    smtp.callback([](SMTP_Status status) {
+      Serial.printf("\nSend results...\n\tCompleated Count: %d\n\tFailed Count: %d\n\tInformation:\n\t\t%s\n\n", status.completedCount(), status.failedCount(), status.info());
+      if (status.failedCount() != 0) {
+        if (status.completedCount() == 0) {
+          display.show(F("Send Error!!!"));
+          display.ledOn();
+        } else {
+          display.show(F("Partial Send!"));
+          display.ledFlash();
+        }
+        lastAlertSendError = true;
+      }
+    });
+  } else if (msgType == MT_CANCEL) {
+    smtp.callback([](SMTP_Status status) {
+      Serial.printf("\nSend results...\n\tCompleated Count: %d\n\tFailed Count: %d\n\tInformation:\n\t\t%s\n\n", status.completedCount(), status.failedCount(), status.info());
+      if (status.failedCount() != 0) {
+        if (status.completedCount() == 0) {
+          display.show("Send Error!!!");
+          display.ledOn();
+          yield();
+          delay(3000);
+        } else {
+          display.show("Partial Send!");
+          display.ledFlash();
+          yield();
+          delay(3000);
+        }
+      }
+    });
+  }
+
+  smtp.connect(&config);
+  if (!MailClient.sendMail(&smtp, &msg)) {
+    display.show(F("Send Error!!!"));
+    display.ledOn();
+    Serial.println("Error Sending, Reason: " + smtp.errorReason());
+    if (msgType == MT_ALERT || msgType == MT_PARTIAL) {
       lastAlertSendError = true;
-      if (status.completedCount() == 0) {
-        display.show("Send Error!!!");
-        display.ledOn();
-      } else {
-        display.show("Partial Send!");
-        display.ledFlash();
-        sendPartial();
-      }
+    } else if (msgType == MT_CANCEL) {
+      yield();
+      delay(3000);
     }
-  });
-  smtp.connect(&config);
-  if (!MailClient.sendMail(&smtp, &message)) {
-    display.show("Send Error!!!");
-    display.ledOn();
-    Serial.println("Error Sending, Reason: " + smtp.errorReason());
-    lastAlertSendError = true;
   } else {
-    display.show("Alerts Sent!");
-    display.ledFlash();
-    Serial.println(F("Alerts have been successfuly sent!"));
-    lastAlertSendError = false;
-  }
-}
-
-void sendPartial() {
-  Session_Config config;
-  config.server.host_name = settings.getSmtpHost();
-  config.server.port = settings.getSmtpPort();
-  config.login.email = settings.getSmtpUser();
-  config.login.password = settings.getSmtpPwd();
-
-  // /*
-  //  Set the NTP config time
-  //  For times east of the Prime Meridian use 0-12
-  //  For times west of the Prime Meridian add 12 to the offset.
-  //  Ex. American/Denver GMT would be -6. 6 + 12 = 18
-  //  See https://en.wikipedia.org/wiki/Time_zone for a list of the GMT/UTC timezone offsets
-  //  */
-  // config.time.ntp_server = "pool.ntp.org,time.nist.gov";
-  // config.time.gmt_offset = 3;
-  // config.time.day_light_offset = 0;
-
-  SMTP_Message message;
-  message.sender.name = settings.getFromName();
-  message.sender.email = settings.getFromEmail();
-  String panicLevel = "TEST";
-  switch(settings.getPanicLevel()) {
-    case 1:
-      panicLevel = "TEST";
-    break;
-    case 2:
-      panicLevel = "INFORMATIONAL";
-    break;
-    case 3:
-      panicLevel = "WARNING";
-    break;
-    case 4:
-      panicLevel = "CRITICAL";
-    break;
-    case 5:
-      panicLevel = "EMERGENCY";
-    break;
-  } 
-  
-  message.subject = String(panicLevel + " Alert from: " + settings.getOwner());
-
-  String recips = settings.getRecipients();
-  unsigned int addrCnt = ParseUtils::occurrences(recips, ";");
-  String addresses[addrCnt];
-  ParseUtils::split(recips, ';', addresses, sizeof(addresses));
-  for (String addr : addresses) {
-    message.addRecipient("", addr);
-  }
-
-  message.text.content = "Not all recipients were able to receive the alert!\nYou may want to take that into account with your response!!!";
-
-  SMTPSession smtp;
-  smtp.debug(1);
-  smtp.callback([](SMTP_Status status) {
-    Serial.printf("\nSend results...\n\tCompleated Count: %d\n\tFailed Count: %d\n\tInformation:\n\t\t%s\n\n", status.completedCount(), status.failedCount(), status.info());
-    if (status.failedCount() != 0) {
-      if (status.completedCount() == 0) {
-        display.show("Send Error!!!");
-        display.ledOn();
-      } else {
-        display.show("Partial Send!");
-        display.ledFlash();
-      }
-      lastAlertSendError = true;
+    if (msgType == MT_ALERT || msgType == MT_PARTIAL) {
+      display.show(F("Alerts Sent!"));
+      display.ledFlash();
+      Serial.println(F("Alerts have been successfuly sent!"));
+      lastAlertSendError = false;
+    } else if (msgType == MT_CANCEL) {
+      display.show("Cancel Sent!");
+      display.ledFlash();
+      Serial.println(F("Cancel has been successfuly sent!"));
+      yield();
+      delay(3000);
+      lastAlertSendError = false;  // No matter what because cancel is best effort.
     }
-  });
-  smtp.connect(&config);
-  if (!MailClient.sendMail(&smtp, &message)) {
-    display.show("Send Error!!!");
-    display.ledOn();
-    Serial.println("Error Sending, Reason: " + smtp.errorReason());
-    lastAlertSendError = true;
-  } else {
-    display.show("Alerts Sent!");
-    display.ledFlash();
-    Serial.println(F("Alerts have been successfuly sent!"));
-    lastAlertSendError = false;
   }
-}
-
-void sendCancel() {
-  Session_Config config;
-  config.server.host_name = settings.getSmtpHost();
-  config.server.port = settings.getSmtpPort();
-  config.login.email = settings.getSmtpUser();
-  config.login.password = settings.getSmtpPwd();
-
-  // /*
-  //  Set the NTP config time
-  //  For times east of the Prime Meridian use 0-12
-  //  For times west of the Prime Meridian add 12 to the offset.
-  //  Ex. American/Denver GMT would be -6. 6 + 12 = 18
-  //  See https://en.wikipedia.org/wiki/Time_zone for a list of the GMT/UTC timezone offsets
-  //  */
-  // config.time.ntp_server = "pool.ntp.org,time.nist.gov";
-  // config.time.gmt_offset = 3;
-  // config.time.day_light_offset = 0;
-
-  SMTP_Message message;
-  message.sender.name = settings.getFromName();
-  message.sender.email = settings.getFromEmail();
-  String panicLevel = "TEST";
-  switch(settings.getPanicLevel()) {
-    case 1:
-      panicLevel = "TEST";
-    break;
-    case 2:
-      panicLevel = "INFORMATIONAL";
-    break;
-    case 3:
-      panicLevel = "WARNING";
-    break;
-    case 4:
-      panicLevel = "CRITICAL";
-    break;
-    case 5:
-      panicLevel = "EMERGENCY";
-    break;
-  } 
-  
-  message.subject = String("Canceled:" + panicLevel + " Alert from: " + settings.getOwner());
-
-  String recips = settings.getRecipients();
-  unsigned int addrCnt = ParseUtils::occurrences(recips, ";");
-  String addresses[addrCnt];
-  ParseUtils::split(recips, ';', addresses, sizeof(addresses));
-  for (String addr : addresses) {
-    message.addRecipient("", addr);
-  }
-
-  message.text.content = "The prior alert has been Canceled by the sender!";
-
-  SMTPSession smtp;
-  smtp.debug(1);
-  smtp.callback([](SMTP_Status status) {
-    Serial.printf("\nSend results...\n\tCompleated Count: %d\n\tFailed Count: %d\n\tInformation:\n\t\t%s\n\n", status.completedCount(), status.failedCount(), status.info());
-    if (status.failedCount() != 0) {
-      if (status.completedCount() == 0) {
-        display.show("Send Error!!!");
-        display.ledOn();
-        yield();
-        delay(3000);
-      } else {
-        display.show("Partial Send!");
-        display.ledFlash();
-        yield();
-        delay(3000);
-      }
-    }
-  });
-  smtp.connect(&config);
-  if (!MailClient.sendMail(&smtp, &message)) {
-    display.show("Send Error!!!");
-    display.ledOn();
-    Serial.println("Error Sending, Reason: " + smtp.errorReason());
-    yield();
-    delay(3000);
-  } else {
-    display.show("Cancel Sent!");
-    display.ledFlash();
-    Serial.println(F("Cancel has been successfuly sent!"));
-    yield();
-    delay(3000);
-  }
-  lastAlertSendError = false; // No matter what because cancel is best effort.
 }
 
 /**
@@ -566,7 +461,7 @@ void initNetwork() {
   if (!settings.isNetworkSet()) {
     activateApMode();
   } else {
-    display.show("Connecting...");
+    display.show(F("Connecting..."));
     display.ledOn();
     connectToNetwork();
   }
@@ -673,10 +568,16 @@ void dumpDeviceInfo() {
  */
 void sendHtmlPageUsingTemplate(int code, String title, String heading, String &content) {
   String result = HTML_PAGE_TEMPLATE;
+  if (!result.reserve(4000U)) {
+    Serial.println(F("WARNING!!! htmlPageTemplate() failed to reserve desired memory!"));
+  }
 
   result.replace("${title}", title);
   result.replace("${heading}", heading);
   result.replace("${content}", content);
+
+  Serial.println("\ncontent: \n" + content);
+  Serial.println("\nresult: \n" + result);
 
   webServer.send(code, "text/html", result);
   yield();
@@ -728,8 +629,10 @@ void endpointHandlerAdmin() {
   }
   Serial.println(F("Client has been Authenticated."));
 
+  String content = INITIAL_SETUP_PAGE;
   if (!handleAdminPageUpdates()) { // Client response not yet handled...
-    String content = INITIAL_SETUP_PAGE;
+    Serial.println("DEBUG!!! No update so admin page will be displayed!");
+
     bool isAPMode = (WiFi.getMode() == WIFI_AP);
     if (!isAPMode) {
       content = ADMIN_PAGE;
@@ -757,6 +660,8 @@ void endpointHandlerAdmin() {
     content.replace("${admin_pwd}", settings.getAdminPwd());
 
     sendHtmlPageUsingTemplate(200, F("Device Configuration Page"), F("Device Settings"), content);
+  } else {
+    Serial.println("DEBUG!!! Update so NO admin page will be displayed!");
   }
 }
 
@@ -926,7 +831,6 @@ bool handleAdminPageUpdates() {
       if (needReboot) {
         content = "<h3>Settings update Successful!</h3><h4>Device will reboot now...</h4>";
         sendHtmlPageUsingTemplate(200, "Update Successful", "Update Result", content);
-        yield();
         delay(5000);
 
         ESP.restart();
