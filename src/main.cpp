@@ -15,7 +15,7 @@
 #include "Secrets.h"
 #include "HtmlContent.h"
 
-#define FIRMWARE_VERSION "1.3.6"
+#define FIRMWARE_VERSION "1.3.7"
 #define PANIC_BTN_PIN 12
 #define CANCEL_BTN_PIN 13
 #define LED_PIN 16
@@ -56,10 +56,22 @@ BearSSL::ESP8266WebServerSecure webServer(/*Port*/443);
 BearSSL::ServerSessions serverCache(/*Sessions*/4);
 
 String deviceId = "";
-bool lastAlertSendError = false; // TODO: Might use to flag periodic retries???
-bool deviceInFaultStatus = false;
+// bool lastAlertSendError = false; 
+// bool deviceInFaultStatus = false;
 unsigned long lastInternetVerify = 0UL;
 unsigned long lastInternetVerifySkip = 0UL;
+
+struct DeviceState {
+  bool inParalizedStatus;
+  bool isAlertSend;
+  bool isPartialSend;
+  bool isSendError; // TODO: Might use to flag periodic retries???
+} state = {
+  false,
+  false,
+  false,
+  false
+};
 
 /**
  * ==============================================================================
@@ -123,7 +135,8 @@ void loop() {
  * by the 'resetOrLoadSettings' function.
 */
 void doHandleButtons() {
-  if (!deviceInFaultStatus) {
+  if (!state.inParalizedStatus) {
+    bool ipShown = false;
     /* Check For IP Signal Request */
     if (
       digitalRead(CANCEL_BTN_PIN) == HIGH 
@@ -135,6 +148,7 @@ void doHandleButtons() {
       while (digitalRead(CANCEL_BTN_PIN) == HIGH && digitalRead(PANIC_BTN_PIN) == HIGH) {
         if (!isShown) {
           display.show("IP: " + ip);
+          ipShown = true;
         }
         yield();
       }
@@ -142,7 +156,8 @@ void doHandleButtons() {
 
     /* Check For Panic Button */
     if (
-      digitalRead(PANIC_BTN_PIN) == HIGH 
+      !ipShown
+      && digitalRead(PANIC_BTN_PIN) == HIGH 
       && !settings.getInPanicMode() 
       && digitalRead(CANCEL_BTN_PIN) == LOW
     ) { // Prepare to trigger Panic Mode...
@@ -170,7 +185,8 @@ void doHandleButtons() {
 
     /* Check for Panic Cancel */
     if (
-      digitalRead(CANCEL_BTN_PIN) == HIGH 
+      !ipShown
+      && digitalRead(CANCEL_BTN_PIN) == HIGH 
       && settings.getInPanicMode() 
       && digitalRead(PANIC_BTN_PIN) == LOW
     ) { // Prepare to cancel Panic Mode...
@@ -206,12 +222,17 @@ void doHandleButtons() {
  * not in an alert condition.
 */
 void doVerifyDeviceStatus() {
-  if (!settings.getInPanicMode()) {
+  if (!settings.getInPanicMode()) { // Not in Panic Mode...
+    /* Reset Panic Mode State Flags*/
+    state.isAlertSend = false;
+    state.isPartialSend = false;
+    state.isSendError = false;
+
     /* Device in AP Mode triggers a fault */
-    if (!deviceInFaultStatus && WiFi.getMode() == WIFI_AP) {
+    if (!state.inParalizedStatus && WiFi.getMode() == WIFI_AP) {
       display.show(F("Setup Required!"));
       display.ledOn();
-      deviceInFaultStatus = true;
+      state.inParalizedStatus = true;
     } 
     /* Periodic SMTP Host Checks */
     if (WiFi.getMode() == WIFI_STA) {
@@ -219,20 +240,31 @@ void doVerifyDeviceStatus() {
         if (isConnectionGood()) {
           display.show(F("System Ready."));
           display.ledOff();
-          deviceInFaultStatus = false;
-        } else if (!deviceInFaultStatus) {
+          state.inParalizedStatus = false;
+        } else if (!state.inParalizedStatus) {
           display.show(F("Internet Down?"));
           display.ledOn();
-          deviceInFaultStatus = true;
+          state.inParalizedStatus = true;
         }
 
         lastInternetVerify = millis();
-      } else if (!deviceInFaultStatus && millis() - lastInternetVerifySkip > 3000UL) {
+      } else if (!state.inParalizedStatus && millis() - lastInternetVerifySkip > 3000UL) {
         display.show(F("System Ready."));
         display.ledOff();
 
         lastInternetVerifySkip = millis();
       }
+    }
+  } else { // In Panic Mode!!!
+    if (state.isSendError && !state.isPartialSend) { // Send Error and No Partial Sent...
+      display.show(F("Send Error!!!"));
+      display.ledOn();
+    } else if (state.isSendError) { // Partial Send Notification Sent...
+      display.show(F("Partial Send!"));
+      display.ledFlash();
+    } else {
+      display.show(F("Alerts Sent!"));
+      display.ledFlash();
     }
   }
 }
@@ -390,29 +422,22 @@ void sendMessage(enum MessageType msgType) {
     smtp.callback([](SMTP_Status status) { // <---- Start of CallBack Function
       Serial.printf("\nSend results...\n\tCompleated Count: %d\n\tFailed Count: %d\n\tInformation:\n\t\t%s\n\n", status.completedCount(), status.failedCount(), status.info());
       if (status.failedCount() != 0) { // Some or all sends failed...
-        lastAlertSendError = true;
-        if (status.completedCount() == 0) { // No sends completed...
-          display.show(F("Send Error!!!"));
-          display.ledOn();
-        } else { // Partial send occurred...
-          display.show(F("Partial Send!"));
-          display.ledFlash();
-          // sendMessage(MessageType::MT_PARTIAL); // FIXME: Could result in many partial messages as callback gets called many times during send.
+        state.isSendError = true;
+        if (status.completedCount() != 0 && !state.isPartialSend) { // Partial send occurred...
+          sendMessage(MessageType::MT_PARTIAL);
         }
       }
     }); // <---- End of CallBack Function
   } else if (msgType == MT_PARTIAL) {
     smtp.callback([](SMTP_Status status) {
       Serial.printf("\nSend results...\n\tCompleated Count: %d\n\tFailed Count: %d\n\tInformation:\n\t\t%s\n\n", status.completedCount(), status.failedCount(), status.info());
-      if (status.failedCount() != 0) {
-        if (status.completedCount() == 0) {
-          display.show(F("Send Error!!!"));
-          display.ledOn();
-        } else {
-          display.show(F("Partial Send!"));
-          display.ledFlash();
+      if (status.failedCount() != 0) { // Some or all sends failed...
+        state.isSendError = true;
+        if (status.completedCount() != 0 && !state.isPartialSend) {
+          state.isPartialSend = true;
         }
-        lastAlertSendError = true;
+      } else { // Nothing failed...
+        state.isPartialSend = true;
       }
     });
   } else if (msgType == MT_CANCEL) {
@@ -435,29 +460,22 @@ void sendMessage(enum MessageType msgType) {
   }
 
   smtp.connect(&config);
-  if (!MailClient.sendMail(&smtp, &msg)) {
-    display.show(F("Send Error!!!"));
-    display.ledOn();
+  if (!MailClient.sendMail(&smtp, &msg)) { // Error sending mail...
     Serial.println("Error Sending, Reason: " + smtp.errorReason());
     if (msgType == MT_ALERT || msgType == MT_PARTIAL) {
-      lastAlertSendError = true;
-    } else if (msgType == MT_CANCEL) {
-      yield();
-      delay(3000);
-    }
-  } else {
+      state.isSendError = true;
+    } 
+  } else { // Email send successful...
     if (msgType == MT_ALERT || msgType == MT_PARTIAL) {
-      display.show(F("Alerts Sent!"));
-      display.ledFlash();
       Serial.println(F("Alerts have been successfuly sent!"));
-      lastAlertSendError = false;
+      state.isSendError = false;
     } else if (msgType == MT_CANCEL) {
       display.show("Cancel Sent!");
       display.ledFlash();
       Serial.println(F("Cancel has been successfuly sent!"));
       yield();
       delay(3000);
-      lastAlertSendError = false;  // No matter what because cancel is best effort.
+      state.isSendError = false;  // No matter what because cancel is best effort.
     }
   }
 }
