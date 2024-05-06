@@ -113,12 +113,18 @@ bool Settings::isFactoryDefault() {
  * @return Returns true if the settings have been changed from default, otherwise returns false as bool.
 */
 bool Settings::isNetworkSet() {
-    if (getSsid().equals(String(factorySettings.ssid)) || getPwd().equals(String(factorySettings.pwd))) {
+    if (String(nvSettings.ssid).equals(String(factorySettings.ssid)) || String(nvSettings.pwd).equals(String(factorySettings.pwd))) {
         
         return false;
     }
 
     return true;
+}
+
+
+NonVolatileSettings Settings::getFactorySettings() {
+
+    return factorySettings;
 }
 
 /*
@@ -139,6 +145,11 @@ void Settings::setSsid(const char *ssid) { // <---------------------------------
     }
 }
 
+bool Settings::isSsidFactory() { // <--------------------------------------------- isSsidFactory
+
+    return String(nvSettings.ssid).equals(String(factorySettings.ssid));
+}
+
 
 String Settings::getPwd() { // <-------------------------------------------------- getPwd
 
@@ -149,6 +160,11 @@ void Settings::setPwd(const char *pwd) { // <-----------------------------------
     if (sizeof(pwd) <= sizeof(nvSettings.pwd)) {
         strcpy(nvSettings.pwd, pwd);
     }
+}
+
+bool Settings::isPwdFactory() { // <---------------------------------------------- isPwdFactory
+
+    return String(nvSettings.pwd).equals(String(factorySettings.pwd));
 }
 
 
@@ -163,6 +179,11 @@ void Settings::setOwner(const char* owner) { // <-------------------------------
     }
 }
 
+bool Settings::isOwnerFactory() { // <------------------------------------------- isOwnerFactory
+
+    return String(nvSettings.owner).equals(String(factorySettings.owner));
+}
+
 
 String Settings::getMessage() { // <---------------------------------------------- getMessage
 
@@ -173,6 +194,11 @@ void Settings::setMessage(const char* message) { // <---------------------------
     if (sizeof(message) <= sizeof(nvSettings.message)) {
         strcpy(nvSettings.message, message);
     }
+}
+
+bool Settings::isMessageFactory() { // <------------------------------------------ isMessageFactory
+
+    return String(nvSettings.message).equals(String(factorySettings.message));
 }
 
 
@@ -187,6 +213,11 @@ void Settings::setSmtpHost(const char* host) { // <-----------------------------
     }
 }
 
+bool Settings::isSmtpHostFactory() { // <---------------------------------------- isSmtpHostFactory
+
+    return String(nvSettings.smtpHost).equals(String(factorySettings.smtpHost));
+}
+
 
 unsigned int Settings::getSmtpPort() { // <--------------------------------------- getSmtpPort
 
@@ -195,6 +226,11 @@ unsigned int Settings::getSmtpPort() { // <-------------------------------------
 
 void Settings::setSmtpPort(unsigned int port) { // <------------------------------ setSmtpPort
     nvSettings.smtpPort = port;
+}
+
+bool Settings::isSmtpPortFactory() { // <----------------------------------------- isSmtpPortFactory
+
+    return (nvSettings.smtpPort == factorySettings.smtpPort);
 }
 
 
@@ -209,6 +245,11 @@ void Settings::setSmtpUser(const char* user) { // <-----------------------------
     }
 }
 
+bool Settings::isSmtpUserFactory() { // <----------------------------------------- isSmtpUserFactory
+
+    return String(nvSettings.smtpUser).equals(String(factorySettings.smtpUser));
+}
+
 
 String Settings::getSmtpPwd() { // <---------------------------------------------- getSmtpPwd
 
@@ -219,6 +260,11 @@ void Settings::setSmtpPwd(const char* pwd) { // <-------------------------------
     if (sizeof(pwd) <= sizeof(nvSettings.smtpPwd)) {
         strcpy(nvSettings.smtpPwd, pwd);
     }
+}
+
+bool Settings::isSmtpPwdFactory() { // <------------------------------------------ isSmtpPwdFactory
+
+    return String(nvSettings.smtpPwd).equals(String(factorySettings.smtpPwd));
 }
 
 
@@ -233,6 +279,11 @@ void Settings::setFromEmail(const char* email) { // <---------------------------
     }
 }
 
+bool Settings::isFromEmailFactory() { // <---------------------------------------- isFromEmailFactory
+
+    return String(nvSettings.fromEmail).equals(String(factorySettings.fromEmail));
+}
+
 
 String Settings::getFromName() { // <--------------------------------------------- getFromName
 
@@ -245,6 +296,11 @@ void Settings::setFromName(const char* name) { // <-----------------------------
     }
 }
 
+bool Settings::isFromNameFactory() { // <----------------------------------------- isFromNameFactory
+
+    return String(nvSettings.fromName).equals(String(factorySettings.fromName));
+}
+
 
 String Settings::getRecipients() { // <------------------------------------------- getRecipients
     
@@ -255,6 +311,11 @@ void Settings::setRecipients(const char* recips) { // <-------------------------
     if (sizeof(recips) <= sizeof(nvSettings.recipients)) {
         strcpy(nvSettings.recipients, recips);
     }
+}
+
+bool Settings::isRecipientsFactory() { // <--------------------------------------- isRecipientsFactory
+
+    return String(nvSettings.recipients).equals(String(factorySettings.recipients));
 }
 
 
@@ -277,18 +338,10 @@ void Settings::setPanicLevel(int level) { // <----------------------------------
     nvSettings.panicLevel = level;
 }
 
+bool Settings::isPanicLevelFactory() { // <--------------------------------------- isPanicLevelFactory
 
-String Settings::getAdminPwd() { // <--------------------------------------------- getAdminPwd
-
-    return String(nvSettings.adminPwd);
+    return (nvSettings.panicLevel == factorySettings.panicLevel);
 }
-
-void Settings::setAdminPwd(const char* pwd) { // <-------------------------------- setAdminPwd
-    if (sizeof(pwd) <= sizeof(nvSettings.adminPwd)) {
-        strcpy(nvSettings.adminPwd, pwd);
-    }
-}
-
 
 
 String Settings::getHostname(String deviceId) {
@@ -336,6 +389,11 @@ String Settings::getAdminUser() {
     return String(constSettings.adminUser);
 }
 
+String Settings::getAdminPwd() {
+
+    return String(constSettings.adminPwd);
+}
+
 /*
 =================================================================
 Private Functions
@@ -352,7 +410,6 @@ void Settings::defaultSettings() {
     // Default the settings..
     strcpy(nvSettings.ssid, factorySettings.ssid);
     strcpy(nvSettings.pwd, factorySettings.pwd);
-    strcpy(nvSettings.adminPwd, factorySettings.adminPwd);
     strcpy(nvSettings.owner, factorySettings.owner);
     strcpy(nvSettings.message, factorySettings.message);
     strcpy(nvSettings.smtpHost, factorySettings.smtpHost);
@@ -370,6 +427,7 @@ void Settings::defaultSettings() {
 }
 
 /**
+ * #### PRIVATE FUNCTION ####
  * Used to provide a hash of the given NonVolatileSettings.
  * 
  * @param nvSet An instance of NonVolatileSettings to calculate a hash for.
@@ -380,7 +438,6 @@ String Settings::hashNvSettings(struct NonVolatileSettings nvSet) {
     String content = "";
     content = content + String(nvSet.ssid);
     content = content + String(nvSet.pwd);
-    content = content + String(nvSet.adminPwd);
     content = content + String(nvSet.owner);
     content = content + String(nvSet.message);
     content = content + String(nvSet.smtpHost);

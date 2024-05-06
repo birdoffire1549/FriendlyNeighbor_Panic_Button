@@ -19,35 +19,33 @@
     #include <HardwareSerial.h>
     #include <MD5Builder.h>
 
+    // *****************************************************************************
+    // Structure used for storing of settings related data and persisted into flash
+    // *****************************************************************************
+    struct NonVolatileSettings {
+        char           ssid             [33]       ; // 32 chars is max size + 1 null
+        char           pwd              [64]       ; // 63 chars is max size + 1 null
+        char           owner            [101]      ;
+        char           message          [101]      ;
+        char           smtpHost         [121]      ;
+        unsigned int   smtpPort                    ;
+        char           smtpUser         [121]      ;
+        char           smtpPwd          [121]      ; 
+        char           fromEmail        [121]      ;
+        char           fromName         [51]       ;
+        char           recipients       [510]      ; // CSV 10 Addresses each max of 50 chars + null
+        bool           inPanicMode                 ;
+        int            panicLevel                  ;
+        char           sentinel         [33]       ; // Holds a 32 MD5 hash + 1
+    };
+    
     class Settings {
         private:
-            // *****************************************************************************
-            // Structure used for storing of settings related data and persisted into flash
-            // *****************************************************************************
-            struct NonVolatileSettings {
-                char           ssid             [33]       ; // 32 chars is max size + 1 null
-                char           pwd              [64]       ; // 63 chars is max size + 1 null
-                char           adminPwd         [64]       ;
-                char           owner            [101]      ;
-                char           message          [101]      ;
-                char           smtpHost         [121]      ;
-                unsigned int   smtpPort                    ;
-                char           smtpUser         [121]      ;
-                char           smtpPwd          [121]      ; 
-                char           fromEmail        [121]      ;
-                char           fromName         [51]       ;
-                char           recipients       [510]      ; // CSV 10 Addresses each max of 50 chars + null
-                bool           inPanicMode                 ;
-                int            panicLevel                  ;
-                char           sentinel         [33]       ; // Holds a 32 MD5 hash + 1
-            };
-
             struct NonVolatileSettings nvSettings;
-            struct NonVolatileSettings factorySettings = {
+            const struct NonVolatileSettings factorySettings = {
                 "SET_ME", // <-------------------------- ssid
                 "SET_ME", // <-------------------------- pwd
-                "P@ssw0rd123", // <--------------------- adminPwd
-                "Jane Doe", // <------------------------ owner
+                "SET_ME", // <-------------------------- owner
                 "Please send help ASAP!", // <---------- message
                 "SET_ME", // <-------------------------- smtpHost
                 465, // <------------------------------- smtpPort
@@ -84,6 +82,7 @@
                 String         apSubnet          ;
                 String         apGateway         ;
                 String         adminUser         ;
+                String         adminPwd          ;
             } constSettings = {
                 "FNPB-", // <--------------- hostnamePrefix (*later ID is added)
                 "Panic_Button_", // <------- apSsidPrefix (*later ID is added)
@@ -91,7 +90,8 @@
                 "192.168.1.1", // <--------- apNetIp
                 "255.255.255.0", // <------- apSubnet
                 "0.0.0.0", // <------------- apGateway
-                "admin" // <---------------- adminUser
+                "admin", // <--------------- adminUser
+                "P@ssw0rd123" // <---------- adminPwd
             };
             
             void defaultSettings();
@@ -107,6 +107,8 @@
             bool isFactoryDefault();
             bool isNetworkSet();
 
+            NonVolatileSettings getFactorySettings();
+
             /*
             =========================================================
                                 Getters and Setters 
@@ -114,33 +116,55 @@
             */
             void           setSsid                    (const char* ssid)          ;
             String         getSsid                    ()                          ;
+            bool           isSsidFactory              ()                          ;
+
             void           setPwd                     (const char* pwd)           ;
             String         getPwd                     ()                          ;
+            bool           isPwdFactory               ()                          ;
+
             void           setOwner                   (const char* owner)         ;
             String         getOwner                   ()                          ;
+            bool           isOwnerFactory             ()                          ;
+
             void           setMessage                 (const char* message)       ;
             String         getMessage                 ()                          ;
+            bool           isMessageFactory           ()                          ;
+
             void           setSmtpHost                (const char* host)          ;
             String         getSmtpHost                ()                          ;
+            bool           isSmtpHostFactory          ()                          ;
+
             void           setSmtpPort                (unsigned int port)         ;
             unsigned int   getSmtpPort                ()                          ;
+            bool           isSmtpPortFactory          ()                          ;
+
             void           setSmtpUser                (const char* user)          ;
             String         getSmtpUser                ()                          ;
+            bool           isSmtpUserFactory          ()                          ;
+
             void           setSmtpPwd                 (const char* pwd)           ;
             String         getSmtpPwd                 ()                          ;
+            bool           isSmtpPwdFactory           ()                          ;
+
             void           setFromEmail               (const char* email)         ;
             String         getFromEmail               ()                          ;
+            bool           isFromEmailFactory         ()                          ;
+
             void           setFromName                (const char* name)          ;
             String         getFromName                ()                          ;
+            bool           isFromNameFactory          ()                          ;
+
             void           setRecipients              (const char* recips)        ;
             String         getRecipients              ()                          ;
+            bool           isRecipientsFactory        ()                          ;
+
             void           setPanicLevel              (int level)                 ;
             int            getPanicLevel              ()                          ;
+            bool           isPanicLevelFactory        ()                          ;
+
             void           setInPanicMode             (bool inPanic)              ;
             bool           getInPanicMode             ()                          ;
-            void           setAdminPwd                (const char* pwd)           ;
-            String         getAdminPwd                ()                          ;
-
+            
 
             String         getHostname       (String deviceId)        ;
             String         getApSsid         (String deviceId)        ;
@@ -148,7 +172,8 @@
             String         getApNetIp        ()                       ;
             String         getApSubnet       ()                       ;    
             String         getApGateway      ()                       ;
-            String         getAdminUser      ()                       ;     
+            String         getAdminUser      ()                       ;
+            String         getAdminPwd       ()                       ;     
     };
     
 #endif

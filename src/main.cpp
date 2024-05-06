@@ -7,6 +7,7 @@
 #include <ESP8266WebServerSecure.h>
 #include <Adafruit_SSD1306.h>
 #include <DisplayWrapper.h>
+#include <ArduinoJson.h>
 
 #include <ESP_Mail_Client.h>
 
@@ -14,7 +15,7 @@
 #include "Secrets.h"
 #include "HtmlContent.h"
 
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.3.6"
 #define PANIC_BTN_PIN 12
 #define CANCEL_BTN_PIN 13
 #define LED_PIN 16
@@ -32,17 +33,17 @@ void initWeb();
 void sendMessage(enum MessageType messageType);
 void dumpDeviceInfo();
 bool isConnectionGood();
-
+String getSettingsAsJson();
 void fileUploadHandler();
 void notFoundHandler();
 void endpointHandlerAdmin();
+void endpointHandlerUpdate();
 void endpointHandlerRoot();
 
 void activateApMode();
 void connectToNetwork();
 
 void sendHtmlPageUsingTemplate(int code, String title, String heading, String &content);
-bool handleAdminPageUpdates();
 
 void doVerifyDeviceStatus();
 void doHandleButtons();
@@ -57,8 +58,8 @@ BearSSL::ServerSessions serverCache(/*Sessions*/4);
 String deviceId = "";
 bool lastAlertSendError = false; // TODO: Might use to flag periodic retries???
 bool deviceInFaultStatus = false;
-unsigned int lastVerifyDeviceStatusStep = 0U;
 unsigned long lastInternetVerify = 0UL;
+unsigned long lastInternetVerifySkip = 0UL;
 
 /**
  * ==============================================================================
@@ -147,7 +148,7 @@ void doHandleButtons() {
     ) { // Prepare to trigger Panic Mode...
       int countDown = 3;
       while (digitalRead(PANIC_BTN_PIN) == HIGH && countDown != -1) {
-        display.show("Panic in... " + countDown);
+        display.show("Panic in... " + String(countDown));
         countDown --;
         delay(1000);
       }
@@ -175,7 +176,7 @@ void doHandleButtons() {
     ) { // Prepare to cancel Panic Mode...
       int countDown = 3;
       while (digitalRead(CANCEL_BTN_PIN) == HIGH && countDown != -1) {
-        display.show("Cancel in... " + countDown);
+        display.show("Cancel in... " + String(countDown));
         countDown --;
         delay(1000);
       }
@@ -213,23 +214,27 @@ void doVerifyDeviceStatus() {
       deviceInFaultStatus = true;
     } 
     /* Periodic SMTP Host Checks */
-    if (WiFi.getMode() == WIFI_STA && millis() - lastInternetVerify > 120000UL) {
-      if (isConnectionGood()) {
+    if (WiFi.getMode() == WIFI_STA) {
+      if (millis() - lastInternetVerify > 120000UL) {
+        if (isConnectionGood()) {
+          display.show(F("System Ready."));
+          display.ledOff();
+          deviceInFaultStatus = false;
+        } else if (!deviceInFaultStatus) {
+          display.show(F("Internet Down?"));
+          display.ledOn();
+          deviceInFaultStatus = true;
+        }
+
+        lastInternetVerify = millis();
+      } else if (!deviceInFaultStatus && millis() - lastInternetVerifySkip > 3000UL) {
         display.show(F("System Ready."));
         display.ledOff();
-        deviceInFaultStatus = false;
-      } else if (!deviceInFaultStatus) {
-        display.show(F("Internet Down?"));
-        display.ledOn();
-        deviceInFaultStatus = true;
-      }
-      lastInternetVerify = millis();
-    }
-  } else if (lastVerifyDeviceStatusStep != 0U) {
-    lastVerifyDeviceStatusStep = 0U;
-  }
 
-  delay(50);
+        lastInternetVerifySkip = millis();
+      }
+    }
+  }
 }
 
 /**
@@ -287,18 +292,19 @@ void resetOrLoadSettings() {
       while(digitalRead(CANCEL_BTN_PIN) == HIGH) { // Wait for pin to be released to continue...
         yield();
       }
-    } else {
-      Serial.println(F("Factory reset aborted."));
-      display.show(F("Reset Aborted."));
-      yield();
-      delay(3000);
-    }
 
+      return;
+    } 
+    
+    Serial.println(F("Factory reset aborted."));
+    display.show(F("Reset Aborted."));
+    yield();
+    delay(3000);
+    
     display.show(F("Initializing..."));
-  } else { // Normal load restore pin not pressed...
-    // Load from EEPROM if applicable...
-    settings.loadSettings();
   }
+
+  settings.loadSettings();
 }
 
 /**
@@ -318,16 +324,16 @@ void sendMessage(enum MessageType msgType) {
   config.login.email = settings.getSmtpUser();
   config.login.password = settings.getSmtpPwd();
 
-  // /*
-  //  Set the NTP config time
-  //  For times east of the Prime Meridian use 0-12
-  //  For times west of the Prime Meridian add 12 to the offset.
-  //  Ex. American/Denver GMT would be -6. 6 + 12 = 18
-  //  See https://en.wikipedia.org/wiki/Time_zone for a list of the GMT/UTC timezone offsets
-  //  */
-  // config.time.ntp_server = "pool.ntp.org,time.nist.gov";
-  // config.time.gmt_offset = 3;
-  // config.time.day_light_offset = 0;
+  /* 
+    Set the NTP config time
+    For times east of the Prime Meridian use 0-12
+    For times west of the Prime Meridian add 12 to the offset.
+    Ex. American/Denver GMT would be -6. 6 + 12 = 18
+    See https://en.wikipedia.org/wiki/Time_zone for a list of the GMT/UTC timezone offsets
+  */
+  config.time.ntp_server = "pool.ntp.org,time.nist.gov";
+  config.time.gmt_offset = 18;
+  config.time.day_light_offset = 0;
 
   SMTP_Message msg;
   msg.sender.name = settings.getFromName();
@@ -353,10 +359,14 @@ void sendMessage(enum MessageType msgType) {
 
   String recips = settings.getRecipients();
   unsigned int addrCnt = ParseUtils::occurrences(recips, ";");
+  addrCnt ++; // because ';' only needed if more than 1 address
   String addresses[addrCnt];
   ParseUtils::split(recips, ';', addresses, sizeof(addresses));
   for (String addr : addresses) {
-    msg.addRecipient("", addr);
+    addr.trim();
+    if (!addr.isEmpty()) {
+      msg.addRecipient("", addr);
+    }
   }
   
   switch (msgType) {
@@ -369,7 +379,7 @@ void sendMessage(enum MessageType msgType) {
       msg.text.content = F("Not all recipients were able to receive the alert!\nYou may want to take that into account with your response!!!");
       break;
     case MT_CANCEL:
-      msg.subject = String("Canceled:" + panicLevel + " Alert from: " + settings.getOwner());
+      msg.subject = String("Canceled: " + panicLevel + " Alert from: " + settings.getOwner());
       msg.text.content = F("The prior alert has been Canceled by the sender!");
       break;
   }
@@ -377,20 +387,20 @@ void sendMessage(enum MessageType msgType) {
   SMTPSession smtp;
   smtp.debug(1);
   if (msgType == MT_ALERT) {
-    smtp.callback([](SMTP_Status status) {
+    smtp.callback([](SMTP_Status status) { // <---- Start of CallBack Function
       Serial.printf("\nSend results...\n\tCompleated Count: %d\n\tFailed Count: %d\n\tInformation:\n\t\t%s\n\n", status.completedCount(), status.failedCount(), status.info());
-      if (status.failedCount() != 0) {
+      if (status.failedCount() != 0) { // Some or all sends failed...
         lastAlertSendError = true;
-        if (status.completedCount() == 0) {
+        if (status.completedCount() == 0) { // No sends completed...
           display.show(F("Send Error!!!"));
           display.ledOn();
-        } else {
+        } else { // Partial send occurred...
           display.show(F("Partial Send!"));
           display.ledFlash();
-          sendMessage(MessageType::MT_PARTIAL);
+          // sendMessage(MessageType::MT_PARTIAL); // FIXME: Could result in many partial messages as callback gets called many times during send.
         }
       }
-    });
+    }); // <---- End of CallBack Function
   } else if (msgType == MT_PARTIAL) {
     smtp.callback([](SMTP_Status status) {
       Serial.printf("\nSend results...\n\tCompleated Count: %d\n\tFailed Count: %d\n\tInformation:\n\t\t%s\n\n", status.completedCount(), status.failedCount(), status.info());
@@ -528,22 +538,28 @@ void connectToNetwork() {
  * started when in AP mode.
 */
 void initWeb() {
-  Serial.println(F("Initializing Web-Server..."));
-  #ifndef Secrets_h
-    webServer.getServer().setRSACert(new BearSSL::X509List(SAMPLE_SERVER_CERT), new BearSSL::PrivateKey(SAMPLE_SERVER_KEY));
-  #else
-    webServer.getServer().setRSACert(new BearSSL::X509List(server_cert), new BearSSL::PrivateKey(server_key));
-  #endif
-  webServer.getServer().setCache(&serverCache);
+  if (WiFi.getMode() == WIFI_STA) {
+    webServer.stop();
+    Serial.println(F("Device is configured so WebService will not be started!"));
+  } else {
+    Serial.println(F("Initializing Web-Server..."));
+    #ifndef Secrets_h
+      webServer.getServer().setRSACert(new BearSSL::X509List(SAMPLE_SERVER_CERT), new BearSSL::PrivateKey(SAMPLE_SERVER_KEY));
+    #else
+      webServer.getServer().setRSACert(new BearSSL::X509List(server_cert), new BearSSL::PrivateKey(server_key));
+    #endif
+    webServer.getServer().setCache(&serverCache);
 
-  /* Setup Endpoint Handlers */
-  webServer.on(F("/"), endpointHandlerRoot);
-  webServer.on(F("/admin"), endpointHandlerAdmin);
-  webServer.onNotFound(notFoundHandler);
-  webServer.onFileUpload(fileUploadHandler);
+    /* Setup Endpoint Handlers */
+    webServer.on(F("/"), endpointHandlerRoot);
+    webServer.on(F("/admin"), endpointHandlerAdmin);
+    webServer.on(F("/update"), endpointHandlerUpdate);
+    webServer.onNotFound(notFoundHandler);
+    webServer.onFileUpload(fileUploadHandler);
 
-  webServer.begin();
-  Serial.println(F("Web-Server started."));
+    webServer.begin();
+    Serial.println(F("Web-Server started."));
+  }
 }
 
 /**
@@ -568,18 +584,15 @@ void dumpDeviceInfo() {
  */
 void sendHtmlPageUsingTemplate(int code, String title, String heading, String &content) {
   String result = HTML_PAGE_TEMPLATE;
-  if (!result.reserve(4000U)) {
-    Serial.println(F("WARNING!!! htmlPageTemplate() failed to reserve desired memory!"));
+  if (!result.reserve(3000U)) {
+    Serial.println(F("WARNING!!! Failed to reserve desired memory for webpage!"));
   }
 
   result.replace("${title}", title);
   result.replace("${heading}", heading);
   result.replace("${content}", content);
 
-  Serial.println("\ncontent: \n" + content);
-  Serial.println("\nresult: \n" + result);
-
-  webServer.send(code, "text/html", result);
+  webServer.send_P(code, "text/html", result.c_str());
   yield();
 }
 
@@ -629,224 +642,328 @@ void endpointHandlerAdmin() {
   }
   Serial.println(F("Client has been Authenticated."));
 
-  String content = INITIAL_SETUP_PAGE;
-  if (!handleAdminPageUpdates()) { // Client response not yet handled...
-    Serial.println("DEBUG!!! No update so admin page will be displayed!");
-
-    bool isAPMode = (WiFi.getMode() == WIFI_AP);
-    if (!isAPMode) {
-      content = ADMIN_PAGE;
-    }
-
-    /* Fill out information that can only be edited in Initial Setup */
-    content.replace("${ssid}", settings.getSsid());
-    content.replace("${owner}", settings.getOwner());
-    content.replace("${message}", settings.getMessage());
-    content.replace("${smtp_host}", settings.getSmtpHost());
-    content.replace("${smtp_port}", String(settings.getSmtpPort()));
-    content.replace("${smtp_user}", settings.getSmtpUser());
-    content.replace("${from_email}", settings.getFromEmail());
-    content.replace("${from_name}", settings.getFromName());
-    content.replace("${panic_level}", String(settings.getPanicLevel()));
+  String content = ADMIN_PAGE;
+  content.replace("${settings}", getSettingsAsJson());
     
-    /* Fill out information that can only be edited and viewed in Initial Setup */
-    if (isAPMode) { // In Initial Setup mode...
-      content.replace("${pwd}", settings.getPwd());
-      content.replace("${smtp_pwd}", settings.getSmtpPwd());  
-    }
-    
-    /* Fill out information that can always be edited */
-    content.replace("${recips}", settings.getRecipients());
-    content.replace("${admin_pwd}", settings.getAdminPwd());
-
-    sendHtmlPageUsingTemplate(200, F("Device Configuration Page"), F("Device Settings"), content);
-  } else {
-    Serial.println("DEBUG!!! Update so NO admin page will be displayed!");
-  }
+  sendHtmlPageUsingTemplate(200, F("Device Configuration Page"), F("Device Settings"), content);
 }
 
-/**
- * This function handles incoming updates which are made via the Initial Settings
- * or Admin Page.
-*/
-bool handleAdminPageUpdates() {
-  bool isChange = false;
-  bool needReboot = false;
-  bool changeSkipped = false;
-  
-  if (WiFi.getMode() == WIFI_AP) { // In initial setup...
-    String ssid = webServer.arg("ssid");
-    ssid.trim();
-    if (!ssid.isEmpty() && !ssid.equals(settings.getSsid())) {
-      if (ssid.length() < 33U) {
-        settings.setSsid(ssid.c_str());
-        isChange = true;
-        needReboot = true;
-      } else {
-        changeSkipped = true;
-      }
-    }
 
-    String msg = webServer.arg("message");
-    msg.trim();
-    if (!msg.isEmpty() && !msg.equals(settings.getMessage())) {
-      if (msg.length() < 101U) {
-        settings.setMessage(msg.c_str());
-        isChange = true;
-      } else {
-        changeSkipped = true;
-      }
-    }
+void endpointHandlerUpdate() {
+  /* Ensure user authenticated */
+  Serial.println(F("Client requested access to '/update'."));
+  if (!webServer.authenticate(settings.getAdminUser().c_str(), settings.getAdminPwd().c_str())) { // User not authenticated...
+    Serial.println(F("Client not(yet) Authenticated!"));
 
-    String sHost = webServer.arg("smtp_host");
-    sHost.trim();
-    if (!sHost.isEmpty() && !sHost.equals(settings.getSmtpHost())) {
-      if (sHost.length() < 121U) {
-        settings.setSmtpHost(sHost.c_str());
-        isChange = true;
-      } else {
-        changeSkipped = true;
-      }
-    }
-
-    String sPort = webServer.arg("smtp_port");
-    sPort.trim();
-    if (!sPort.isEmpty() && !sPort.equals(String(settings.getSmtpPort()))) {
-      unsigned int p = sPort.toInt();
-      if (p > 0 && p <= 65535U) {
-        settings.setSmtpPort(p);
-        isChange = true;
-      } else {
-        changeSkipped = true;
-      }
-    }
-
-    String sUser = webServer.arg("smtp_user");
-    sUser.trim();
-    if (!sUser.isEmpty() && !sUser.equals(settings.getSmtpUser())) {
-      if (sUser.length() < 121U) {
-        settings.setSmtpUser(sUser.c_str());
-        isChange = true;
-      } else {
-        changeSkipped = true;
-      }
-    }
-
-    String fEmail = webServer.arg("from_email");
-    fEmail.trim();
-    if (!fEmail.isEmpty() && !fEmail.equals(settings.getFromEmail())) {
-      if (fEmail.length() < 121U) {
-        settings.setFromEmail(fEmail.c_str());
-        isChange = true;
-      } else {
-        changeSkipped = true;
-      }
-    }
-    
-    String fName = webServer.arg("from_name");
-    fName.trim();
-    if (!fName.isEmpty() && !fName.equals(settings.getFromName())) {
-      if (fName.length() < 51U) {
-        settings.setFromName(fName.c_str());
-        isChange = true;
-      } else {
-        changeSkipped = true;
-      }
-    }
-
-    String pLevel = webServer.arg("panic_level");
-    pLevel.trim();
-    if (!pLevel.isEmpty() && !pLevel.equals(String(settings.getPanicLevel()))) {
-      int tmp = pLevel.toInt();
-      if (tmp > 0 && tmp <= 5) {
-        settings.setPanicLevel(tmp);
-        isChange = true;
-      } else {
-        changeSkipped = true;
-      }
-    }
-
-    String smtpPwd = webServer.arg("smtp_pwd");
-    smtpPwd.trim();
-    if (!smtpPwd.isEmpty() && !smtpPwd.equals(settings.getSmtpPwd())) {
-      if (smtpPwd.length() < 121U) {
-        settings.setSmtpPwd(smtpPwd.c_str());
-        isChange = true;
-      } else {
-        changeSkipped = true;
-      }
-    }
-    
-    String pwd = webServer.arg("pwd");
-    pwd.trim();
-    if (!pwd.isEmpty() && !pwd.equals(settings.getPwd())) {
-      if (pwd.length() < 64U) {
-        settings.setPwd(pwd.c_str());
-        isChange = true;
-        needReboot = true;
-      } else {
-        changeSkipped = true;
-      }
-    }
+    return webServer.requestAuthentication(DIGEST_AUTH, "AdminRealm", "Authentication failed!");
   }
-  
-  /* Check and update Recipients */
-  String recips = webServer.arg("recips");
-  recips.trim(); // To make check isBlank.
-  if (!recips.isEmpty() && !recips.equals(settings.getRecipients())) { // Something to there...
-    if (recips.length() < 510U) { // Will fit in memory...
-      settings.setRecipients(recips.c_str());
-      isChange = true;
-    } else {
-      changeSkipped = true;
-    }
-  }
+  Serial.println(F("Client has been Authenticated."));
 
-  /* Check and update Admin Password */
-  String adminPwd = webServer.arg("admin_pwd");
-  adminPwd.trim();
-  if (!adminPwd.isEmpty() && !adminPwd.equals(settings.getAdminPwd())) {
-    if (adminPwd.length() < 64U) {
-      isChange = true;
-      // TODO: Wish could expire past auths...
-      settings.setAdminPwd(adminPwd.c_str());
-    } else {
-      changeSkipped = true;
-    }
-  }
+  String setts = webServer.arg("data");
+  setts.trim();
+  JsonDocument jDoc;
 
-  String content = "";
+  if (!setts.isEmpty()) {
+    DeserializationError err = deserializeJson(jDoc, setts);
+    if (err.code() != DeserializationError::Ok) { // Problem with incoming JSON...
+      String errMsg = String("Deserialization of JSON settings failed: ") + err.c_str();
+      Serial.println(errMsg);
+      
+      return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), errMsg);
+    } else { // JSON Seemed good...
+      /* ************ *
+       * UPDATE: ssid *
+       * ************ */
+      String ssid = jDoc["ssid"];
+      ssid.trim();
+      if (!ssid.isEmpty() && !ssid.equals(String(settings.getFactorySettings().ssid))) {
+        if (ssid.length() < 33U) {
+          settings.setSsid(ssid.c_str());
+        } else {
+          String msg = F("SSID must not be longer than 32 characters!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("SSID is required for configuration!");
+        sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        Serial.println(msg);
+        
+        return; 
+      }
 
-  if (changeSkipped) {
-    content.concat("<h3>ERROR: No changes made because some requested changes were invalid due to length(s) or value(s)!</h3>");
+      /* *********** *
+       * UPDATE: pwd *
+       * *********** */
+      String pwd = jDoc["pwd"];
+      pwd.trim();
+      if (!pwd.isEmpty() && !pwd.equals(String(settings.getFactorySettings().pwd))) {
+        if (pwd.length() < 64U) {
+          settings.setPwd(pwd.c_str());
+        } else {
+          String msg = F("Pwd must not be longer than 63 characters!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("Pwd is required for configuration!");
+        Serial.println(msg);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
 
-    sendHtmlPageUsingTemplate(400, "Update Failure", "Update Failure", content);
-    yield();
+      /* ***************** *
+       * UPDATE: smtp_host * 
+       * ***************** */
+      String sHost = jDoc["smtp_host"];
+      sHost.trim();
+      if (!sHost.isEmpty() && !sHost.equals(String(settings.getFactorySettings().smtpHost))) {
+        if (sHost.length() < 121U) {
+          settings.setSmtpHost(sHost.c_str());
+        } else {
+          String msg = F("SMTP Host must not be longer than 120 characters!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("SMTP Host is required for configuration!");
+        Serial.println(msg);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
 
-    return true;
-  }
+      /* ***************** *
+       * UPDATE: smtp_port *
+       * ***************** */
+      String sPort = jDoc["smtp_port"];
+      sPort.trim();
+      if (!sPort.isEmpty()) {
+        unsigned int p = sPort.toInt();
+        if (p > 0 && p <= 65535U) {
+          settings.setSmtpPort(p);
+        } else {
+          String msg = F("SMTP Port must be within valid port range!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("SMTP Port is required for configuration!");
+        Serial.println(msg);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
 
-  if (isChange) {
-    if (settings.saveSettings()) {
-      if (needReboot) {
-        content = "<h3>Settings update Successful!</h3><h4>Device will reboot now...</h4>";
-        sendHtmlPageUsingTemplate(200, "Update Successful", "Update Result", content);
-        delay(5000);
+      /* ***************** *
+       * UPDATE: smtp_user *
+       * ***************** */
+      String sUser = jDoc["smtp_user"];
+      sUser.trim();
+      if (!sUser.isEmpty() && !sUser.equals(String(settings.getFactorySettings().smtpUser))) {
+        if (sUser.length() < 121U) {
+          settings.setSmtpUser(sUser.c_str());
+        } else {
+          String msg = F("SMTP User must be no longer than 120 characters in length!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("SMTP User is required for configuration!");
+        Serial.println(msg);
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
+
+      /* **************** *
+       * UPDATE: smtp_pwd *
+       * **************** */
+      String smtpPwd = jDoc["smtp_pwd"];
+      smtpPwd.trim();
+      if (!smtpPwd.isEmpty() && !smtpPwd.equals(String(settings.getFactorySettings().smtpPwd))) {
+        if (smtpPwd.length() < 121U) {
+          settings.setSmtpPwd(smtpPwd.c_str());
+        } else {
+          String msg = F("SMTP Password must be no longer than 120 characters in length!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("SMTP Password is required for configuration!");
+        Serial.println(msg);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
+
+      /* ***************** *
+       * UPDATE: from_name *
+       * ***************** */
+      String fName = jDoc["from_name"];
+      fName.trim();
+      if (!fName.isEmpty()) {
+        if (fName.length() < 51U) {
+          settings.setFromName(fName.c_str());
+        } else {
+          String msg = F("The 'From Name' must be no longer than 50 characters in length!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("The 'From Name' is required for configuration!");
+        Serial.println(msg);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
+
+      /* ****************** *
+       * UPDATE: from_email *
+       * ****************** */
+      String fEmail = jDoc["from_email"];
+      fEmail.trim();
+      if (!fEmail.isEmpty()) {
+        if (fEmail.length() < 121U) {
+          settings.setFromEmail(fEmail.c_str());
+        } else {
+          String msg = F("The 'From Email' must be no longer than 120 characters in length!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("The 'From Email' is required for configuration!");
+        Serial.println(msg);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
+
+      /* ************* *
+       * UPDATE: owner *
+       * ************* */
+      String owner = jDoc["owner"];
+      owner.trim();
+      if (!owner.isEmpty() && !owner.equals(String(settings.getFactorySettings().owner))) {
+        if (owner.length() < 101U) {
+          settings.setOwner(owner.c_str());
+        } else {
+          String msg = F("Owner must be no longer than 100 characters in length!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("Owner is required for configuration!");
+        Serial.println(msg);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
+
+      /* *************** *
+       * UPDATE: message *
+       * *************** */
+      String msg = jDoc["message"];
+      msg.trim();
+      if (!msg.isEmpty()) {
+        if (msg.length() < 101U) {
+          settings.setMessage(msg.c_str());
+        } else {
+          String msg = F("Message must be no longer than 100 characters in length!");
+          Serial.println(msg);
+
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("Message is required for configuration!");
+        Serial.println(msg);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
+
+      /* ******************* *
+       * UPDATE: panic_level *
+       * ******************* */
+      String pLevel = jDoc["panic_level"];
+      pLevel.trim();
+      if (!pLevel.isEmpty()) {
+        int tmp = pLevel.toInt();
+        if (tmp > 0 && tmp <= 5) {
+          settings.setPanicLevel(tmp);
+        } else {
+          String msg = F("Panic Level must be greater than 0 and less than 6!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("Panic Level is required for configuration!");
+        Serial.println(msg);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
+
+      /* ****************** *
+       * UPDATE: recipients *
+       * ****************** */
+      String recips = jDoc["recipients"];
+      recips.trim(); // To make check isBlank.
+      if (!recips.isEmpty() && !recips.equals(String(settings.getFactorySettings().recipients))) { // Something to there...
+        if (recips.length() < 510U) { // Will fit in memory...
+          settings.setRecipients(recips.c_str());
+        } else {
+          String msg = F("Recipients must be no longer than 509 characters in length!");
+          Serial.println(msg);
+          
+          return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+        }
+      } else {
+        String msg = F("Recipients are required for configuration!");
+        Serial.println(msg);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), msg);
+      }
+      
+      /* Save Settings to Flash */
+      if (settings.saveSettings()) {
+        String content = "<h3>Settings update Successful!</h3><h4>Device will reboot now...</h4>";
+        sendHtmlPageUsingTemplate(200, F("Update Successful"), F("Update Result"), content);
+        Serial.println(content);
 
         ESP.restart();
-      } else if (isChange) {
-        content = "<h3>Settings update Successful!</h3>";
-        sendHtmlPageUsingTemplate(200, "Update Successful", "Update Result", content);
-
-        return true;
+      } else  {
+        String content = "<h3>Error Saving Settings!!!</h3>";
+        Serial.println(content);
+        
+        return sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), content);
       }
-    } else  {
-      content = "<h3>Error Saving Settings!!!</h3>";
-      sendHtmlPageUsingTemplate(500, "Internal Error", "500 - Internal Server Error", content);
-
-        return true;
     }
   }
 
-  return false;
+  String content = "Update request didn't contain any data! Sending admin page content!";
+  Serial.println(content);
+  endpointHandlerAdmin();
+  // sendHtmlPageUsingTemplate(500, F("500 - Internal Server Error"), F("500 - Internal Server Error"), content);
+}
+
+String getSettingsAsJson() {
+  JsonDocument jDoc;
+  jDoc["ssid"] = settings.getSsid();
+  jDoc["pwd"] = settings.getPwd();
+  jDoc["smtp_host"] = settings.getSmtpHost();
+  jDoc["smtp_port"] = settings.getSmtpPort();
+  jDoc["smtp_user"] = settings.getSmtpUser();
+  jDoc["smtp_pwd"] = settings.getSmtpPwd();
+  jDoc["from_name"] = settings.getFromName();
+  jDoc["from_email"] = settings.getFromEmail();
+  jDoc["owner"] = settings.getOwner();
+  jDoc["message"] = settings.getMessage();
+  jDoc["panic_level"] = settings.getPanicLevel();
+  jDoc["recipients"] = settings.getRecipients();
+
+  String output;
+  serializeJsonPretty(jDoc, output);
+
+  return output;
 }
