@@ -15,7 +15,7 @@
 #include "Secrets.h"
 #include "HtmlContent.h"
 
-#define FIRMWARE_VERSION "1.3.7"
+#define FIRMWARE_VERSION "1.4.0"
 #define PANIC_BTN_PIN 12
 #define CANCEL_BTN_PIN 13
 #define LED_PIN 16
